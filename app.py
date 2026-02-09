@@ -56,87 +56,91 @@ conf = load_config()
 st.set_page_config(page_title=conf.get("app_title", "教学分析工具"), layout="wide")
 
 # ==========================================
-# BLOCK 3: 数据处理大脑 (事项 1 - 维度扩容)
+# BLOCK 3: 数据处理大脑 (事项 1 - 深度逻辑修复)
 # ==========================================
+import re
+
+def natural_sort_key(s):
+    """自定义排序：处理‘七八九’汉字与数字混合排序"""
+    char_map = {'七': 7, '八': 8, '九': 9, '十': 10}
+    # 优先提取年级汉字
+    for char, val in char_map.items():
+        if char in s: return (val, [int(text) if text.isdigit() else text for text in re.split('([0-9]+)', s)])
+    return (99, [int(text) if text.isdigit() else text for text in re.split('([0-9]+)', s)])
+
 def process_full_dimensions(df):
     try:
-        # 1. 基础清洗
         df['周'] = pd.to_datetime(df['周'], errors='coerce')
         df = df.dropna(subset=['周']).fillna(0)
         
-        # 2. 核心字段名匹配（确保兼容用户Excel）
-        col_t_assign = "老师布置课时总时长（分钟）"
-        col_s_watch = "学生观看AI课堂课时微课总时长(分钟)"
+        # 字段兼容性定义
+        col_t = "老师布置课时总时长（分钟）"
+        col_s = "学生观看AI课堂课时微课总时长(分钟)"
+        col_comp = "微课完成率" # 补全完课率
         
+        for col in [col_t, col_s, col_comp]:
+            if col not in df.columns: df[col] = 0
+
         all_weeks = sorted(df['周'].unique())
         target_week = all_weeks[-1]
-        prev_week = all_weeks[-2] if len(all_weeks) > 1 else None
+        curr_df = df[df['周'] == target_week].copy()
         
-        # 3. 本周数据切片
-        curr_df = df[df['周'] == target_week]
+        # --- KPI核算 ---
         m_curr = {
             'hours': int(curr_df['课时数'].sum()), 
             'att': curr_df['课时平均出勤率'].mean(), 
             'corr': curr_df['题目正确率（自学+快背）'].mean(),
-            't_assign_sum': int(curr_df[col_t_assign].sum()), # 新增：老师布置总时长
-            's_watch_sum': int(curr_df[col_s_watch].sum())    # 新增：学生观看总时长
+            't_assign_sum': int(curr_df[col_t].sum()), 
+            's_watch_sum': int(curr_df[col_s].sum())
         }
         
-        # 4. 标杆与关注逻辑
-        class_group = curr_df.groupby('班级名称').agg({
-            '课时平均出勤率':'mean', 
-            col_t_assign:'sum', 
-            col_s_watch:'sum'
+        # --- 维度 2 & 3：班级效能（含汉字数字混合排序） ---
+        class_stats = curr_df.groupby('班级名称').agg({
+            '课时数':'sum', '课时平均出勤率':'mean', 
+            '题目正确率（自学+快背）':'mean', col_t:'sum', col_s:'sum'
         }).reset_index()
-        best_row = class_group.sort_values('课时平均出勤率', ascending=False).iloc[0]
-        best_html = f'<div class="highlight-box success-box">🏆 <b>本周标杆班级:</b> {best_row["班级名称"]} (出勤率 {best_row["课时平均出勤率"]*100:.1f}%)</div>'
+        
+        # 维度 2 的排序：年级汉字+班级数字
+        class_stats['sort_key'] = class_stats['班级名称'].apply(natural_sort_key)
+        c_stats_sorted_by_name = class_stats.sort_values('sort_key')
+        
+        # 维度 3 的排序：课时数从大到小
+        c_stats_sorted_by_hours = class_stats.sort_values('课时数', ascending=False)
 
-        # 5. 详细数据表格 (增加两列)
+        # --- 生成维度 3 表格 HTML ---
         table_rows = ""
         avg_att = m_curr['att']
-        for _, row in curr_df.iterrows():
-            att_style = "class='alert'" if row['课时平均出勤率'] < avg_att else ""
-            table_rows += f"""
-            <tr>
-                <td>{row['班级名称']}</td>
-                <td>{row['课时数']}</td>
-                <td {att_style}>{row['课时平均出勤率']*100:.1f}%</td>
-                <td>{int(row[col_t_assign])}</td>
-                <td>{int(row[col_s_watch])}</td>
-            </tr>"""
-        tables_html = f"""
-        <table>
-            <thead><tr><th>班级</th><th>课时</th><th>出勤率</th><th>老师布置(分)</th><th>学生观看(分)</th></tr></thead>
-            <tbody>{table_rows}</tbody>
-        </table>"""
+        for _, row in c_stats_sorted_by_hours.iterrows():
+            style = "style='color:red;font-weight:bold;'" if row['课时平均出勤率'] < avg_att else ""
+            table_rows += f"<tr><td>{row['班级名称']}</td><td>{row['课时数']}</td><td {style}>{row['课时平均出勤率']*100:.1f}%</td><td>{int(row[col_t])}</td><td>{int(row[col_s])}</td></tr>"
 
-        # 6. 趋势数据 (增加时长维度趋势)
+        # --- 历史趋势聚合 ---
         trend = df.groupby('周').agg({
-            '课时数':'sum', 
-            '课时平均出勤率':'mean', 
-            col_t_assign:'mean', 
-            col_s_watch:'mean'
+            '课时数':'sum', '课时平均出勤率':'mean', 
+            '题目正确率（自学+快背）':'mean', col_comp:'mean',
+            col_t:'sum', col_s:'sum' # 维度 5 改为合计
         }).reset_index()
         
         return {
             "target_week": target_week.strftime('%Y-%m-%d'),
-            "m_curr": m_curr,
-            "best_html": best_html, 
-            "tables_html": tables_html,
-            "c_cats": class_group['班级名称'].tolist(), 
-            "c_hours": curr_df.groupby('班级名称')['课时数'].sum().tolist(),
-            "c_att": (class_group['课时平均出勤率']*100).round(1).tolist(),
+            "m_curr": m_curr, "tables_html": table_rows,
+            "c_cats": c_stats_sorted_by_name['班级名称'].tolist(), 
+            "c_hours": c_stats_sorted_by_name['课时数'].tolist(),
+            "c_att": (c_stats_sorted_by_name['课时平均出勤率']*100).round(1).tolist(),
+            "c_corr": (c_stats_sorted_by_name['题目正确率（自学+快背）']*100).round(1).tolist(),
             "t_dates": trend['周'].dt.strftime('%m-%d').tolist(), 
             "t_hours": trend['课时数'].tolist(),
             "t_att": (trend['课时平均出勤率']*100).round(1).tolist(),
-            "t_assign_avg": trend[col_t_assign].round(1).tolist(), # 新增趋势
-            "t_watch_avg": trend[col_s_watch].round(1).tolist()    # 新增趋势
+            "t_corr": (trend['题目正确率（自学+快背）']*100).round(1).tolist(),
+            "t_comp": (trend[col_comp]*100).round(1).tolist(),
+            "t_assign_sum": trend[col_t].tolist(),
+            "t_watch_sum": trend[col_s].tolist()
         }
     except Exception as e:
-        st.error(f"数据处理失败，请确保Excel包含'老师布置课时总时长（分钟）'等列。错误: {e}"); return None
+        st.error(f"分析逻辑出错: {e}"); return None
 
 # ==========================================
-# BLOCK 4: HTML 报表生成 (事项 3 - 零删减 + 维度扩容)
+# BLOCK 4: HTML 报表生成 (事项 3 - 维度补全)
 # ==========================================
 def get_full_report_html(d):
     html = f"""
@@ -150,14 +154,10 @@ def get_full_report_html(d):
         .kpi {{ display: flex; justify-content: space-around; text-align: center; flex-wrap: wrap; }}
         .kpi div {{ min-width: 200px; margin: 10px 0; }}
         .kpi div strong {{ font-size: 28px; color: #2980b9; display: block; }}
-        .highlight-box {{ padding: 15px; margin: 10px 0; border-radius: 5px; font-size: 14px; }}
-        .success-box {{ background: #d4edda; color: #155724; border-left: 5px solid #28a745; }}
         table {{ width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }}
         th {{ background: #eee; padding: 10px; border-bottom: 2px solid #ddd; }} 
         td {{ padding: 10px; border-bottom: 1px solid #eee; text-align: center; }}
-        .alert {{ color: #e74c3c; font-weight: bold; }}
-        .chart {{ height: 400px; width: 100%; }}
-        .footer {{ text-align:center; color:#999; font-size:12px; margin-top:20px; }}
+        .chart {{ height: 420px; width: 100%; }}
     </style>
     </head>
     <body>
@@ -172,29 +172,28 @@ def get_full_report_html(d):
                 <div><strong>{d['m_curr']['t_assign_sum']}</strong>老师布置总时长(分)</div>
                 <div><strong>{d['m_curr']['s_watch_sum']}</strong>学生观看总时长(分)</div>
             </div>
-            {d['best_html']}
         </div>
 
-        <div class="card"><h3>📊 维度 2：班级效能分析</h3><div id="c1" class="chart"></div></div>
+        <div class="card"><h3>📊 维度 2：班级效能分析 (班级序)</h3><div id="c1" class="chart"></div></div>
         
-        <div class="card"><h3>📊 维度 3：详细数据明细</h3>
-            <p style="text-align:right;color:#999;font-size:11px">* 出勤率红色表示低于均值</p>
+        <div class="card"><h3>📊 维度 3：本周详细数据 (按课时排序)</h3>
             {d['tables_html']}
         </div>
         
-        <div class="card"><h3>📊 维度 4：历史趋势 - 课时与出勤</h3><div id="c2" class="chart"></div></div>
+        <div class="card"><h3>📊 维度 4：全周期历史趋势 (课时/出勤/正确/完课)</h3><div id="c2" class="chart"></div></div>
         
-        <div class="card"><h3>📊 维度 5：历史趋势 - 布置与观看时长(周平均)</h3><div id="c3" class="chart"></div></div>
+        <div class="card"><h3>📊 维度 5：历史趋势 - 老师布置时长与观看时长</h3><div id="c3" class="chart"></div></div>
 
         <script>
             var c1 = echarts.init(document.getElementById('c1'));
             c1.setOption({{
                 tooltip: {{trigger:'axis'}}, legend: {{bottom:0}},
-                xAxis: {{type:'category', data:{json.dumps(d['c_cats'])} }},
+                xAxis: {{type:'category', data:{json.dumps(d['c_cats'])}, axisLabel:{{rotate:30, interval:0}} }},
                 yAxis: [{{type:'value', name:'课时'}}, {{type:'value', name:'%', max:100}}],
                 series: [
-                    {{type:'bar', name:'课时', data:{json.dumps(d['c_hours'])} }},
-                    {{type:'line', yAxisIndex:1, name:'出勤率', data:{json.dumps(d['c_att'])} }}
+                    {{type:'bar', name:'课时', data:{json.dumps(d['c_hours'])}, itemStyle:{{color:'#3498db'}} }},
+                    {{type:'line', yAxisIndex:1, name:'出勤率', data:{json.dumps(d['c_att'])}, itemStyle:{{color:'#2ecc71'}} }},
+                    {{type:'line', yAxisIndex:1, name:'正确率', data:{json.dumps(d['c_corr'])}, itemStyle:{{color:'#e74c3c'}} }}
                 ]
             }});
 
@@ -205,7 +204,9 @@ def get_full_report_html(d):
                 yAxis: [{{type:'value', name:'总课时'}}, {{type:'value', name:'%', max:100}}],
                 series: [
                     {{type:'bar', name:'总课时', data:{json.dumps(d['t_hours'])}, itemStyle:{{color:'#9b59b6'}} }},
-                    {{type:'line', yAxisIndex:1, name:'平均出勤', data:{json.dumps(d['t_att'])}, itemStyle:{{color:'#2ecc71'}} }}
+                    {{type:'line', yAxisIndex:1, name:'平均出勤', data:{json.dumps(d['t_att'])}, itemStyle:{{color:'#2ecc71'}} }},
+                    {{type:'line', yAxisIndex:1, name:'正确率', data:{json.dumps(d['t_corr'])}, itemStyle:{{color:'#e74c3c'}} }},
+                    {{type:'line', yAxisIndex:1, name:'完课率', data:{json.dumps(d['t_comp'])}, itemStyle:{{color:'#f1c40f'}} }}
                 ]
             }});
 
@@ -213,15 +214,15 @@ def get_full_report_html(d):
             c3.setOption({{
                 tooltip: {{trigger:'axis'}}, legend: {{bottom:0}},
                 xAxis: {{type:'category', data:{json.dumps(d['t_dates'])} }},
-                yAxis: [{{type:'value', name:'老师布置(分)'}}, {{type:'value', name:'学生观看(分)'}}],
+                yAxis: {{type:'value', name:'合计时长(分钟)'}},
                 series: [
-                    {{type:'line', name:'老师布置', data:{json.dumps(d['t_assign_avg'])}, itemStyle:{{color:'#3498db'}}, smooth:true }},
-                    {{type:'line', yAxisIndex:1, name:'学生观看', data:{json.dumps(d['t_watch_avg'])}, itemStyle:{{color:'#e67e22'}}, smooth:true }}
+                    {{type:'line', name:'老师布置合计', data:{json.dumps(d['t_assign_sum'])}, itemStyle:{{color:'#3498db'}}, smooth:true }},
+                    {{type:'line', name:'学生观看合计', data:{json.dumps(d['t_watch_sum'])}, itemStyle:{{color:'#e67e22'}}, smooth:true }}
                 ]
             }});
         </script>
     </body></html>
-    """
+    \"\"\"
     return html
 
 # ==========================================
