@@ -8,16 +8,52 @@ import streamlit.components.v1 as components
 # ==========================================
 # BLOCK 1: 基础配置 (事项 2)
 # ==========================================
+# ==========================================
+# BLOCK 1: 基础配置 (事项 2 - 增强修复版)
+# ==========================================
 CONFIG_FILE = "config_v2.json"
+
 def load_config():
-    defaults = {"admin_password": "199266", "user_password": "a123456", "app_title": "AI课堂教学数据分析工具"}
+    """读取配置文件，并自动补全缺失的标签"""
+    defaults = {
+        "admin_password": "199266", 
+        "user_password": "a123456",
+        "app_title": "AI课堂教学数据分析工具",  # 报错就是因为旧文件缺这一行
+        "upload_hint": "⬆️ 请上传班级教学数据 Excel 原文件"
+    }
+    
+    # 如果文件不存在，直接创建默认的
     if not os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'w') as f: json.dump(defaults, f)
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(defaults, f, ensure_ascii=False)
         return defaults
-    with open(CONFIG_FILE, 'r') as f: return json.load(f)
+
+    # 如果文件存在，我们要读取它，并检查是否少了新标签
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            current_conf = json.load(f)
+        
+        # 【核心修复逻辑】：如果旧文件少了某个标签（比如 app_title），自动补上去
+        updated = False
+        for key, value in defaults.items():
+            if key not in current_conf:
+                current_conf[key] = value
+                updated = True
+        
+        # 如果补了新标签，把新的存回去，下次就不会报错了
+        if updated:
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(current_conf, f, ensure_ascii=False)
+        
+        return current_conf
+    except:
+        # 如果文件损坏了，直接返回默认值，确保不崩溃
+        return defaults
 
 conf = load_config()
-st.set_page_config(page_title=conf["app_title"], layout="wide")
+
+# 这一行就是之前报错的地方，现在我们确保 conf 里面一定有 "app_title" 了
+st.set_page_config(page_title=conf.get("app_title", "教学分析工具"), layout="wide")
 
 # ==========================================
 # BLOCK 3: 数据处理大脑 (事项 1 - 维度扩容)
