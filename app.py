@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
+import re
 import json
 import datetime
 import streamlit.components.v1 as components
@@ -8,249 +9,196 @@ import streamlit.components.v1 as components
 # ==========================================
 # BLOCK 1: 基础配置 (事项 2)
 # ==========================================
-# ==========================================
-# BLOCK 1: 基础配置 (事项 2 - 增强修复版)
-# ==========================================
-CONFIG_FILE = "config_v2.json"
+CONFIG_FILE = "config_v3.json"
 
 def load_config():
-    """读取配置文件，并自动补全缺失的标签"""
     defaults = {
         "admin_password": "199266", 
         "user_password": "a123456",
-        "app_title": "AI课堂教学数据分析工具",  # 报错就是因为旧文件缺这一行
-        "upload_hint": "⬆️ 请上传班级教学数据 Excel 原文件"
+        "app_title": "AI课堂教学数据分析工具 (3.0 完整版)",
+        "upload_hint": "⬆️ 请上传班级数据 Excel 原文件"
     }
-    
-    # 如果文件不存在，直接创建默认的
     if not os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(defaults, f, ensure_ascii=False)
         return defaults
-
-    # 如果文件存在，我们要读取它，并检查是否少了新标签
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            current_conf = json.load(f)
-        
-        # 【核心修复逻辑】：如果旧文件少了某个标签（比如 app_title），自动补上去
-        updated = False
-        for key, value in defaults.items():
-            if key not in current_conf:
-                current_conf[key] = value
-                updated = True
-        
-        # 如果补了新标签，把新的存回去，下次就不会报错了
-        if updated:
-            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(current_conf, f, ensure_ascii=False)
-        
-        return current_conf
-    except:
-        # 如果文件损坏了，直接返回默认值，确保不崩溃
-        return defaults
+            c = json.load(f)
+            # 自动补全可能缺失的 key
+            for k, v in defaults.items():
+                if k not in c: c[k] = v
+            return c
+    except: return defaults
 
 conf = load_config()
 
-# 这一行就是之前报错的地方，现在我们确保 conf 里面一定有 "app_title" 了
-st.set_page_config(page_title=conf.get("app_title", "教学分析工具"), layout="wide")
-
 # ==========================================
-# BLOCK 3: 数据处理大脑 (事项 1 - 深度逻辑修复)
+# BLOCK 3: 数据处理大脑 (事项 1 - 零删减逻辑)
 # ==========================================
-import re
-
 def natural_sort_key(s):
-    """自定义排序：处理‘七八九’汉字与数字混合排序"""
+    """汉字年级+数字班级 自然排序算法"""
     char_map = {'七': 7, '八': 8, '九': 9, '十': 10}
-    # 优先提取年级汉字
-    for char, val in char_map.items():
-        if char in s: return (val, [int(text) if text.isdigit() else text for text in re.split('([0-9]+)', s)])
-    return (99, [int(text) if text.isdigit() else text for text in re.split('([0-9]+)', s)])
+    grade_weight = 99
+    for char, weight in char_map.items():
+        if char in s:
+            grade_weight = weight
+            break
+    parts = [int(text) if text.isdigit() else text for text in re.split('([0-9]+)', s)]
+    return (grade_weight, parts)
 
-def process_full_dimensions(df):
+def process_data_logic(df):
     try:
+        # 1. 基础清洗
         df['周'] = pd.to_datetime(df['周'], errors='coerce')
         df = df.dropna(subset=['周']).fillna(0)
         
-        # 字段兼容性定义
+        # 2. 字段定义 (维度扩容)
         col_t = "老师布置课时总时长（分钟）"
         col_s = "学生观看AI课堂课时微课总时长(分钟)"
-        col_comp = "微课完成率" # 补全完课率
+        col_comp = "微课完成率"
+        col_corr = "题目正确率（自学+快背）"
         
-        for col in [col_t, col_s, col_comp]:
-            if col not in df.columns: df[col] = 0
+        # 3. 兼容性补全
+        for c in [col_t, col_s, col_comp, col_corr]:
+            if c not in df.columns: df[c] = 0
 
         all_weeks = sorted(df['周'].unique())
+        if not all_weeks: return None
         target_week = all_weeks[-1]
-        curr_df = df[df['周'] == target_week].copy()
         
-        # --- KPI核算 ---
+        # 4. 本周核心数据 (维度 1)
+        curr_df = df[df['周'] == target_week].copy()
         m_curr = {
             'hours': int(curr_df['课时数'].sum()), 
             'att': curr_df['课时平均出勤率'].mean(), 
-            'corr': curr_df['题目正确率（自学+快背）'].mean(),
+            'corr': curr_df[col_corr].mean(),
             't_assign_sum': int(curr_df[col_t].sum()), 
             's_watch_sum': int(curr_df[col_s].sum())
         }
         
-        # --- 维度 2 & 3：班级效能（含汉字数字混合排序） ---
+        # 5. 班级排序 (维度 2)
         class_stats = curr_df.groupby('班级名称').agg({
-            '课时数':'sum', '课时平均出勤率':'mean', 
-            '题目正确率（自学+快背）':'mean', col_t:'sum', col_s:'sum'
+            '课时数':'sum', '课时平均出勤率':'mean', col_corr:'mean'
         }).reset_index()
-        
-        # 维度 2 的排序：年级汉字+班级数字
         class_stats['sort_key'] = class_stats['班级名称'].apply(natural_sort_key)
-        c_stats_sorted_by_name = class_stats.sort_values('sort_key')
+        c_sorted = class_stats.sort_values('sort_key')
         
-        # 维度 3 的排序：课时数从大到小
-        c_stats_sorted_by_hours = class_stats.sort_values('课时数', ascending=False)
-
-        # --- 生成维度 3 表格 HTML ---
-        table_rows = ""
+        # 6. 表格生成 (维度 3 - 课时数降序)
+        table_df = curr_df.sort_values('课时数', ascending=False)
         avg_att = m_curr['att']
-        for _, row in c_stats_sorted_by_hours.iterrows():
-            style = "style='color:red;font-weight:bold;'" if row['课时平均出勤率'] < avg_att else ""
-            table_rows += f"<tr><td>{row['班级名称']}</td><td>{row['课时数']}</td><td {style}>{row['课时平均出勤率']*100:.1f}%</td><td>{int(row[col_t])}</td><td>{int(row[col_s])}</td></tr>"
+        t_rows = ""
+        for _, row in table_df.iterrows():
+            styl = "style='color:red;font-weight:bold;'" if row['课时平均出勤率'] < avg_att else ""
+            t_rows += f"<tr><td>{row['班级名称']}</td><td>{row['课时数']}</td><td {styl}>{row['课时平均出勤率']*100:.1f}%</td><td>{int(row[col_t])}</td><td>{int(row[col_s])}</td></tr>"
 
-        # --- 历史趋势聚合 ---
+        # 7. 趋势聚合 (维度 4 & 5)
         trend = df.groupby('周').agg({
-            '课时数':'sum', '课时平均出勤率':'mean', 
-            '题目正确率（自学+快背）':'mean', col_comp:'mean',
-            col_t:'sum', col_s:'sum' # 维度 5 改为合计
+            '课时数':'sum', '课时平均出勤率':'mean', col_corr:'mean', col_comp:'mean',
+            col_t:'sum', col_s:'sum'
         }).reset_index()
         
         return {
-            "target_week": target_week.strftime('%Y-%m-%d'),
-            "m_curr": m_curr, "tables_html": table_rows,
-            "c_cats": c_stats_sorted_by_name['班级名称'].tolist(), 
-            "c_hours": c_stats_sorted_by_name['课时数'].tolist(),
-            "c_att": (c_stats_sorted_by_name['课时平均出勤率']*100).round(1).tolist(),
-            "c_corr": (c_stats_sorted_by_name['题目正确率（自学+快背）']*100).round(1).tolist(),
-            "t_dates": trend['周'].dt.strftime('%m-%d').tolist(), 
-            "t_hours": trend['课时数'].tolist(),
-            "t_att": (trend['课时平均出勤率']*100).round(1).tolist(),
-            "t_corr": (trend['题目正确率（自学+快背）']*100).round(1).tolist(),
-            "t_comp": (trend[col_comp]*100).round(1).tolist(),
-            "t_assign_sum": trend[col_t].tolist(),
-            "t_watch_sum": trend[col_s].tolist()
+            "date": target_week.strftime('%Y-%m-%d'),
+            "m": m_curr, "t_rows": t_rows,
+            "c_n": c_sorted['班级名称'].tolist(), "c_h": c_sorted['课时数'].tolist(),
+            "c_a": (c_sorted['课时平均出勤率']*100).round(1).tolist(), "c_r": (c_sorted[col_corr]*100).round(1).tolist(),
+            "tr_d": trend['周'].dt.strftime('%m-%d').tolist(), "tr_h": trend['课时数'].tolist(),
+            "tr_a": (trend['课时平均出勤率']*100).round(1).tolist(), "tr_r": (trend[col_corr]*100).round(1).tolist(),
+            "tr_c": (trend[col_comp]*100).round(1).tolist(),
+            "tr_ts": trend[col_t].tolist(), "tr_ss": trend[col_s].tolist()
         }
     except Exception as e:
-        st.error(f"分析逻辑出错: {e}"); return None
+        st.error(f"分析出错: {e}"); return None
 
 # ==========================================
-# BLOCK 4: HTML 报表生成 (事项 3 - 维度补全)
+# BLOCK 4: HTML 报表生成 (事项 3 - 零删减 5 个维度)
 # ==========================================
-def get_full_report_html(d):
-    html = f"""
-    <!DOCTYPE html>
+def get_html_template(d):
+    return f"""
     <html>
-    <head><meta charset="UTF-8">
-    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <head><meta charset="UTF-8"><script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
     <style>
-        body {{ font-family: "Microsoft YaHei", sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; background: #f4f6f9; }}
-        .card {{ background: #fff; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }}
+        body {{ font-family: sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; background: #f4f6f9; }}
+        .card {{ background: #fff; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
         .kpi {{ display: flex; justify-content: space-around; text-align: center; flex-wrap: wrap; }}
-        .kpi div {{ min-width: 200px; margin: 10px 0; }}
         .kpi div strong {{ font-size: 28px; color: #2980b9; display: block; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }}
-        th {{ background: #eee; padding: 10px; border-bottom: 2px solid #ddd; }} 
-        td {{ padding: 10px; border-bottom: 1px solid #eee; text-align: center; }}
-        .chart {{ height: 420px; width: 100%; }}
-    </style>
-    </head>
+        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+        th {{ background: #eee; padding: 10px; }} td {{ padding: 10px; border-bottom: 1px solid #eee; text-align: center; }}
+        .chart {{ height: 400px; width: 100%; }}
+    </style></head>
     <body>
-        <h2 style="text-align:center">AI课堂教学数据分析周报</h2>
-        <div style="text-align:center;color:#666;margin-bottom:20px">统计周期: <b>{d['target_week']}</b></div>
-        
+        <h2 style="text-align:center">AI课堂教学数据分析周报 ({d['date']})</h2>
         <div class="card">
-            <h3>📊 维度 1：本周核心指标</h3>
+            <h3>📊 维度 1：核心指标</h3>
             <div class="kpi">
-                <div><strong>{d['m_curr']['hours']}</strong>总课时</div>
-                <div><strong>{d['m_curr']['att']*100:.1f}%</strong>平均出勤率</div>
-                <div><strong>{d['m_curr']['t_assign_sum']}</strong>老师布置总时长(分)</div>
-                <div><strong>{d['m_curr']['s_watch_sum']}</strong>学生观看总时长(分)</div>
+                <div><strong>{d['m']['hours']}</strong>总课时</div>
+                <div><strong>{d['m']['att']*100:.1f}%</strong>出勤率</div>
+                <div><strong>{d['m']['t_assign_sum']}</strong>布置时长(分)</div>
+                <div><strong>{d['m']['s_watch_sum']}</strong>观看时长(分)</div>
             </div>
         </div>
-
         <div class="card"><h3>📊 维度 2：班级效能分析 (班级序)</h3><div id="c1" class="chart"></div></div>
-        
-        <div class="card"><h3>📊 维度 3：本周详细数据 (按课时排序)</h3>
-            {d['tables_html']}
+        <div class="card"><h3>📊 维度 3：数据明细 (课时排序)</h3>
+            <table><thead><tr><th>班级</th><th>课时</th><th>出勤率</th><th>布置时长</th><th>观看时长</th></tr></thead>
+            <tbody>{d['t_rows']}</tbody></table>
         </div>
-        
-        <div class="card"><h3>📊 维度 4：全周期历史趋势 (课时/出勤/正确/完课)</h3><div id="c2" class="chart"></div></div>
-        
-        <div class="card"><h3>📊 维度 5：历史趋势 - 老师布置时长与观看时长</h3><div id="c3" class="chart"></div></div>
-
+        <div class="card"><h3>📊 维度 4：历史趋势 (多指标)</h3><div id="c2" class="chart"></div></div>
+        <div class="card"><h3>📊 维度 5：历史趋势 (时长合计)</h3><div id="c3" class="chart"></div></div>
         <script>
+            var opt = {{ tooltip:{{trigger:'axis'}}, legend:{{bottom:0}} }};
             var c1 = echarts.init(document.getElementById('c1'));
-            c1.setOption({{
-                tooltip: {{trigger:'axis'}}, legend: {{bottom:0}},
-                xAxis: {{type:'category', data:{json.dumps(d['c_cats'])}, axisLabel:{{rotate:30, interval:0}} }},
-                yAxis: [{{type:'value', name:'课时'}}, {{type:'value', name:'%', max:100}}],
-                series: [
-                    {{type:'bar', name:'课时', data:{json.dumps(d['c_hours'])}, itemStyle:{{color:'#3498db'}} }},
-                    {{type:'line', yAxisIndex:1, name:'出勤率', data:{json.dumps(d['c_att'])}, itemStyle:{{color:'#2ecc71'}} }},
-                    {{type:'line', yAxisIndex:1, name:'正确率', data:{json.dumps(d['c_corr'])}, itemStyle:{{color:'#e74c3c'}} }}
-                ]
+            c1.setOption({{ ...opt, xAxis:{{data:{json.dumps(d['c_n'])} }}, yAxis:[{{type:'value'}},{{type:'value',max:100}}],
+                series:[{{name:'课时',type:'bar',data:{json.dumps(d['c_h'])} }},{{name:'出勤',type:'line',yAxisIndex:1,data:{json.dumps(d['c_a'])} }},{{name:'正确',type:'line',yAxisIndex:1,data:{json.dumps(d['c_r'])} }}]
             }});
-
             var c2 = echarts.init(document.getElementById('c2'));
-            c2.setOption({{
-                tooltip: {{trigger:'axis'}}, legend: {{bottom:0}},
-                xAxis: {{type:'category', data:{json.dumps(d['t_dates'])} }},
-                yAxis: [{{type:'value', name:'总课时'}}, {{type:'value', name:'%', max:100}}],
-                series: [
-                    {{type:'bar', name:'总课时', data:{json.dumps(d['t_hours'])}, itemStyle:{{color:'#9b59b6'}} }},
-                    {{type:'line', yAxisIndex:1, name:'平均出勤', data:{json.dumps(d['t_att'])}, itemStyle:{{color:'#2ecc71'}} }},
-                    {{type:'line', yAxisIndex:1, name:'正确率', data:{json.dumps(d['t_corr'])}, itemStyle:{{color:'#e74c3c'}} }},
-                    {{type:'line', yAxisIndex:1, name:'完课率', data:{json.dumps(d['t_comp'])}, itemStyle:{{color:'#f1c40f'}} }}
-                ]
+            c2.setOption({{ ...opt, xAxis:{{data:{json.dumps(d['tr_d'])} }}, yAxis:[{{type:'value'}},{{type:'value',max:100}}],
+                series:[{{name:'课时',type:'bar',data:{json.dumps(d['tr_h'])} }},{{name:'出勤',type:'line',yAxisIndex:1,data:{json.dumps(d['tr_a'])} }},{{name:'正确',type:'line',yAxisIndex:1,data:{json.dumps(d['tr_r'])} }},{{name:'完课',type:'line',yAxisIndex:1,data:{json.dumps(d['tr_c'])} }}]
             }});
-
             var c3 = echarts.init(document.getElementById('c3'));
-            c3.setOption({{
-                tooltip: {{trigger:'axis'}}, legend: {{bottom:0}},
-                xAxis: {{type:'category', data:{json.dumps(d['t_dates'])} }},
-                yAxis: {{type:'value', name:'合计时长(分钟)'}},
-                series: [
-                    {{type:'line', name:'老师布置合计', data:{json.dumps(d['t_assign_sum'])}, itemStyle:{{color:'#3498db'}}, smooth:true }},
-                    {{type:'line', name:'学生观看合计', data:{json.dumps(d['t_watch_sum'])}, itemStyle:{{color:'#e67e22'}}, smooth:true }}
-                ]
+            c3.setOption({{ ...opt, xAxis:{{data:{json.dumps(d['tr_d'])} }}, yAxis:{{type:'value'}},
+                series:[{{name:'布置合计',type:'line',smooth:true,data:{json.dumps(d['tr_ts'])} }},{{name:'观看合计',type:'line',smooth:true,data:{json.dumps(d['tr_ss'])} }}]
             }});
         </script>
     </body></html>
-    \"\"\"
-    return html
+    """
 
 # ==========================================
-# BLOCK 6: 交互界面 (事项 3 - 登录增强)
+# BLOCK 6: 交互界面 (事项 3 - 3.0 逻辑增强)
 # ==========================================
+st.set_page_config(page_title=conf["app_title"], layout="wide")
+
 if 'logged_in' not in st.session_state: st.session_state.logged_in = False
 
 if not st.session_state.logged_in:
-    # 事项 3：增加软件名称显示
-    st.markdown(f"<h1 style='text-align: center; color: #2c3e50;'>{conf['app_title']}</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #7f8c8d;'>智慧教学数据闭环管理系统</p>", unsafe_allow_html=True)
-    
-    with st.container():
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            st.write("---")
-            pwd = st.text_input("🔑 请输入系统准入密码", type="password")
-            if st.button("立即进入系统", use_container_width=True):
-                if pwd == conf["admin_password"] or pwd == conf["user_password"]:
-                    st.session_state.logged_in = True; st.rerun()
-                else: st.error("❌ 密码验证失败，请重新输入")
+    st.markdown(f"<h1 style='text-align: center;'>{conf['app_title']}</h1>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        pwd = st.text_input("🔑 请输入系统准入密码", type="password")
+        if st.button("进入系统", use_container_width=True):
+            if pwd == conf["admin_password"] or pwd == conf["user_password"]:
+                st.session_state.logged_in = True; st.rerun()
+            else: st.error("密码错误")
 else:
-    st.sidebar.title("🚀 数据中心")
-    file = st.file_uploader("导入 Excel 文件", type=["xlsx"])
-    if file:
-        data_packet = process_full_dimensions(pd.read_excel(file))
-        if data_packet:
-            full_html = get_full_report_html(data_packet)
-            st.download_button("📥 下载完整版 HTML 报表", full_html, "完整教学分析报告.html", "text/html")
-            st.subheader("👁️ 实时预览")
-            components.html(full_html, height=1200, scrolling=True)
+    st.sidebar.title("🚀 内容分析中心 (3.0)")
+    # 强制要求上传文件
+    uploaded_file = st.sidebar.file_uploader(conf["upload_hint"], type=["xlsx"])
+    
+    if uploaded_file is None:
+        st.info("👋 欢迎回来！请在左侧侧边栏上传 Excel 文件以开始数据分析。")
+        st.image("https://img.icons8.com/clouds/200/null/upload.png") # 增加一个图标引导
+    else:
+        # 只有在有文件时才运行后续逻辑
+        data_p = process_data_logic(pd.read_excel(uploaded_file))
+        if data_p:
+            html_res = get_html_template(data_p)
+            
+            # 下载与提示
+            c1, c2 = st.columns([1, 3])
+            with c1:
+                st.download_button("📥 下载完整报表", html_res, "分析周报.html", "text/html")
+            with c2:
+                st.markdown("<p style='padding-top:10px; color:#666;'>💡 <b>提醒：</b>下载完成后，若需分析另一份数据，请直接重新上传新文件。</p>", unsafe_allow_html=True)
+            
+            st.divider()
+            components.html(html_res, height=1200, scrolling=True)
